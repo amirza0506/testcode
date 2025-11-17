@@ -538,6 +538,7 @@ docker run -d \
   -p 9000:9000 \
   -v /home/kaliza/sonar-cryptography-plugin-1.4.8.jar:/opt/sonarqube/extensions/plugins/sonar-cryptography-plugin-1.4.8.jar \
   sonarqube:community
+-- browse >>http://localhost:9000
 
 
 Notes::

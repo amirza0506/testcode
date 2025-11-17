@@ -530,7 +530,14 @@ make -j$(nproc)
 # 6. Run the compiled app
 ./pqc_agent
 
+
+17/11/25
 x) Run sonarcube cbomkit hyperion
+docker run -d \               
+  --name sonarqube-custom2 \
+  -p 9000:9000 \
+  -v /home/kaliza/sonar-cryptography-plugin-1.4.8.jar:/opt/sonarqube/extensions/plugins/sonar-cryptography-plugin-1.4.8.jar \
+  sonarqube:community
 
 
 Notes::

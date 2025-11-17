@@ -1,0 +1,543 @@
+Code
+11/6/2025
+
+a) Test PQC (post-quantum cryptography) key exchange or signatures over a network between two VMs(using bridged on both vm)
+1.Test connection
+# On VM1
+ping <VM2-IP>
+# On VM2
+ping <VM1-IP>
+
+2. (On server) Generate keypair
+openssl genpkey -algorithm ML-KEM-512 -out priv.pem
+openssl pkey -in priv.pem -pubout -out pub.pem
+3.(On server) Send pub key to client
+cat pub.pem | nc -l -p 5555
+4.(On client) Receive pub key from server
+nc (192.168.56.101/server_ip) 5555 > server_pub.pem
+5.(On client) Encap
+openssl pkeyutl -encap -inkey server_pub.pem -pubin -out kem_ct.bin -secret kem_ss_sender.bin
+6.(On server) Create port to receive ciphertext
+nc -l -p 5556 > kem_ct.bin
+7.(On client ) Sent ciphertext
+cat kem_ct.bin | nc (192.168.56.101/server_ip) 5556
+8. (On server) Decap
+openssl pkeyutl -decap -inkey priv.pem -in kem_ct.bin -secret kem_ss_recipient.bin
+echo "Server shared secret:"
+xxd kem_ss_recipient.bin
+9. (On client) Show shared secret
+echo "Client shared secret:"
+xxd kem_ss_sender.bin
+Troubleshoot():
+    If nc fails, check firewall settings (sudo ufw disable for testing, or allow ports 5555 and 5556).
+    If you still get same IPs, check network settings in your VM manager and set to Host-Only or Bridged.
+
+b) Test Hybrid tls connection(Built-in Hybrid Ciphersuites)
+Available Hybrid Ciphersuites Example:
+    TLS_AES_256_GCM_SHA384 with hybrid key exchange: X25519+MLKEM512
+    You specify this in the cipher list and key exchange options.
+How to generate a self-signed certificate and key for testing
+
+1. Generate a private key (PQC is for key exchange, so you still need a classical key for the cert):
+bash
+openssl genpkey -algorithm RSA -out server_rsa2048.key -pkeyopt rsa_keygen_bits:2048
+openssl genpkey -algorithm ML-DSA-44 -out server_mldsa44.key …????
+
+2. Generate a self-signed certificate:
+openssl req -new -x509 -key server_rsa2048.key -out server_rsa2048.crt -days 365 -subj "/CN=localhost"
+openssl req -new -x509 -key server_mldsa44.key -out server_mldsa44.crt -days 365 -subj “/CN=localhost”
+Now you will have server.key and server.crt in your directory.
+Now run your OpenSSL hybrid TLS server:
+openssl s_server -cert server_rsa2048.crt -key server_rsa2048.key -www -groups X25519
+openssl s_client -connect <server-ip>:4433 -groups X25519
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -www -groups X25519:MLKEM512 :::::::: -keylogfile sslkeys.log
+openssl s_client -connect <server-ip>:4433 -groups X25519:MLKEM512
+ 
+
+ 
+
+12.6.2025
+c) TLS with PQC 
+┌──(kaliza㉿kaliza)-[~]
+└─$ # Generate private key (e.g., Dilithium2) using MLDSA44 and generate crt
+openssl genpkey -algorithm ML-DSA-44 -out server_mldsa44.key   
+openssl req -new -x509 -key server_mldsa44.key -out server_mldsa44.crt -days 365 -subj "/CN=pqc-server"
+#Use PQC KEM for key exchange (Start Server)
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -www -groups MLKEM512
+#Connect with client()
+openssl s_client -connect 127.0.0.1:4433 -groups MLKEM512
+
+# Generate a self-signed certificate(FAILED)
+openssl req -new -x509 -key server_mlkem512.key -out server_mlkem512.crt -days 365 -subj "/CN=pqc-server" 
+40A7935E667F0000:error:03000096:digital envelope routines:do_sigver_init:operation not supported for this keytype:../crypto/evp/m_sigver.c:298:
+
+d)Crossover with ca
+Create a PQC CA
+A. Generate CA Key (e.g., MLDSA44):
+openssl genpkey -algorithm ML-DSA-44 -out ca_mldsa44.key
+B. Create CA Self-signed Certificate:
+openssl req -new -x509 -key ca_mldsa44.key -out ca_mldsa44.crt -days 3650 -subj "/CN=PQC-Root-CA"
+3. Issue a PQC Server Certificate via the CA
+A. Generate Server Key:
+openssl genpkey -algorithm ML-DSA-44 -out server_mldsa44.key
+B. Create Server CSR (certificate signing request):
+openssl req -new -key server_mldsa44.key -out server_mldsa44.csr -subj "/CN=pqc-server"
+C. Sign Server CSR with CA:
+
+openssl x509 -req -in server_mldsa44.csr -CA ca_mldsa44.crt -CAkey ca_mldsa44.key -CAcreateserial -out server_mldsa44.crt -days 365
+This produces server_mldsa44.crt signed by your PQC CA.
+4. Run a PQC-enabled TLS Server
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -CAfile ca_mldsa44.crt -www -groups MLKEM512
+    -groups MLKEM512 enables Kyber/ML-KEM for PQC key exchange.
+    -CAfile points to your CA's certificate for client verification.
+
+5. Run a PQC-enabled TLS Client
+openssl s_client -connect 127.0.0.1:4433 -CAfile ca_mldsa44.crt -groups MLKEM512
+    This tells the client to trust your PQC CA and use PQC KEM for handshake.
+
+6. Verify
+    Client output should show:
+        Server public key is MLDSA44
+        Key Exchange: MLKEM512
+        The issuer of the server certificate should be /CN=PQC-Root-CA.
+
+7. (Optional) Test with Two VMs
+    Put the CA, server, and client on separate VMs for real network crossover.
+    Use the server VM's IP in the s_client command. 
+
+e) Test crossover using different vms (do (C) or (D) first)
+#Start server(server)(don’t use -www if want to send massage)
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -www -groups MLKEM512
+#start client(client)
+openssl scient   -connect <server-ip>:4433 -groups MLKEM512
+#use wireshark in any server
+Using signature algorithm: Unknown Unknown (0x0905)= mldsa65
+ 
+do
+
+
+    
+References: unknown algo in wireshark:
+https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme
+ 
+Server(on run)
+ 
+
+f) sent ca_mldsa.crt from server to client 	
+Check if SSH is running
+bash
+sudo systemctl status ssh   # Ubuntu/Debian
+Start it if needed:
+bash
+sudo systemctl start ssh
+sudo systemctl enable ssh
+#in client
+scp serveruser@serverip:/path/to/ca.crt /desired/path/on/client/ 
+#in server
+scp /path/to/ca.crt clientuser@clientip:/desired/path/on/client/
+
+g) Crossover with ca
+Create a PQC CA
+A. Generate CA Key (e.g., MLDSA44):
+openssl genpkey -algorithm ML-DSA-44 -out ca_mldsa44.key
+B. Create CA Self-signed Certificate:
+openssl req -new -x509 -key ca_mldsa44.key -out ca_mldsa44.crt -days 3650 -subj "/CN=PQC-Root-CA"
+3. Issue a PQC Server Certificate via the CA
+A. Generate Server Key:
+openssl genpkey -algorithm ML-DSA-44 -out server_mldsa44.key
+B. Create Server CSR (certificate signing request):
+openssl req -new -key server_mldsa44.key -out server_mldsa44.csr -subj "/CN=pqc-server"
+C. Sign Server CSR with CA:
+openssl x509 -req -in server_mldsa44.csr -CA ca_mldsa44.crt -CAkey ca_mldsa44.key -CAcreateserial -out server_mldsa44.crt -days 365
+This produces server_mldsa44.crt signed by your PQC CA.
+4. Run a PQC-enabled TLS Server
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -CAfile ca_mldsa44.crt -www -groups MLKEM512
+    -groups MLKEM512 enables Kyber/ML-KEM for PQC key exchange.
+    -CAfile points to your CA's certificate for client verification.
+5. Generate keypar and crt for client 
+#Generate key and crt for CA
+???
+# Generate client private key
+openssl genpkey -algorithm ML-DSA-44 -out client_mldsa44.key
+# Generate certificate signing request (CSR)
+openssl req -new -key client_mldsa44.key -out client_mldsa44.csr -subj "/CN=client.example.com"
+# Sign client CSR with CA
+openssl x509 -req -in client_mldsa44.csr -CA ca_mldsa44.crt -CAkey ca_mldsa44.key -CAcreateserial -out client_mldsa44.crt -days 3650
+6. Run a PQC-enabled TLS Client
+openssl s_client -connect 127.0.0.1:4433 -CAfile client_mldsa44.crt -groups MLKEM512
+    This tells the client to trust your PQC CA and use PQC KEM for handshake.
+
+7. Verify
+    Client output should show:
+        Server public key is MLDSA44
+        Key Exchange: MLKEM512
+        The issuer of the server certificate should be /CN=PQC-Root-CA.
+
+8. (Optional) Test with Two VMs
+    Put the CA, server, and client on separate VMs for real network crossover.
+    Use the server VM's IP in the s_client command. 
+# Test crossover using different vms (do (C) or (D) first)
+#Start server(server)
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -www -groups MLKEM512
+#start client(client)
+openssl s_client -connect <server-ip>:4433 -groups MLKEM512
+#use wireshark in any server
+Using signature algorithm: Unknown Unknown (0x0905)= mldsa65
+
+18.6.2025()
+h) test tunnel on based on openssl
+#server
+sudo ip tuntap add dev tun0 mode tun
+sudo ip addr add 10.8.0.1/24 dev tun0
+sudo ip link set tun0 up
+sudo socat -d -d TUN,iff-up EXEC:"openssl s_server -quiet -accept 4433 -cert server_mldsa44.crt -key server_mldsa44.key -CAfile ca_mldsa44.crt -Verify 1 -groups MLKEM512"
+#client
+sudo ip tuntap add dev tun0 mode tun
+sudo ip addr add 10.8.0.2/24 dev tun0
+sudo ip link set tun0 up
+sudo socat -d -d TUN,iff-up 'EXEC:"openssl s_client -quiet -connect 10.8.117.18:4433 -CAfile ca_mldsa44.crt -cert client_mldsa44.crt -key client_mldsa44.key -groups MLKEM512"'
+
+19.6.2025###
+i)#test bash  command for ca cert 
+On the CA VM
+bash
+# ca_setup.sh
+#!/bin/bash
+# 1. Generate CA private key and self-signed certificate
+openssl genrsa -out ca.key 4096
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -subj "/CN=My-Root-CA" -out ca.crt
+B. On Server and Client VMs
+bash
+# entity_setup.sh (run as ./entity_setup.sh server or ./entity_setup.sh client)
+#!/bin/bash
+ENTITY=$1
+openssl genrsa -out ${ENTITY}.key 2048
+openssl req -new -key ${ENTITY}.key -subj "/CN=${ENTITY}" -out ${ENTITY}.csr
+# At this point, transfer ${ENTITY}.csr to the CA VM (e.g., using scp or shared folder)
+
+C. On CA VM – Sign the CSR
+bash
+# ca_sign.sh (run as ./ca_sign.sh server or ./ca_sign.sh client)
+#!/bin/bash
+ENTITY=$1
+openssl x509 -req -in ${ENTITY}.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out ${ENTITY}.crt -days 365 -sha256
+# Transfer ${ENTITY}.crt back to the respective VM
+D. On Server/Client VM – Install Certs
+
+Store:
+    ${ENTITY}.key = private key
+    ${ENTITY}.crt = cert signed by CA
+    ca.crt = root CA cert
+
+4. Automating File Transfers
+You need to automate file transfer (e.g., with scp, rsync, or shared folders) for:
+    Sending CSRs from server/client → CA
+    Sending signed certs from CA → server/client
+Example using scp:
+bash
+# On server/client
+scp server.csr user@ca-vm:/path/to/ca/
+# On CA
+scp server.crt user@server-vm:/path/to/server/
+
+5. Orchestrating It All (Sample High-Level Script Flow)
+You can write a master script or use Ansible to coordinate these steps. For bash, you might have:
+bash
+# On CA VM
+./ca_setup.sh
+# On Server/Client
+./entity_setup.sh server
+scp server.csr user@ca-vm:/tmp/
+# On CA
+./ca_sign.sh server
+scp server.crt user@server-vm:/tmp/
+
+# Repeat for client
+
+
+
++**(20.6.2025)
+j) scanning tls and cert using openssl cli
+##command to scanning
+openssl s_client -connect mcmc.gov.my:443
+
+k) tunneling using ssh
+ssh -oKexAlgorithms=sntrup761x25519-sha512@openssh.com -D socks5:localhost:1080 kaliza@10.8.118.133
+google-chrome -X --proxy-server="socks5://localhost:1080" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost"
+
+l) tls handshake using hybrid algo group
+ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384:ecdsa_secp521r1_sha512:ed25519:ed448:ecdsa_sha224:ecdsa_sha1:ecdsa_brainpoolP256r1tls13_sha256:ecdsa_brainpoolP384r1tls13_sha384:ecdsa_brainpoolP512r1tls13_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pss_pss_sha256:rsa_pss_pss_sha384:rsa_pss_pss_sha512:rsa_pkcs1_sha256:rsa_pkcs1_sha384:rsa_pkcs1_sha512:rsa_pkcs1_sha224:rsa_pkcs1_sha1:dsa_sha256:dsa_sha384:dsa_sha512:dsa_sha224:dsa_sha1:mldsa44:mldsa65:mldsa87
+g) Crossover with ca
+Create a PQC CA
+A. Generate CA Key (e.g., MLDSA44):
+openssl genpkey -algorithm ML-DSA-44 -out ca_mldsa44.key
+B. Create CA Self-signed Certificate:
+openssl req -new -x509 -key ca_mldsa44.key -out ca_mldsa44.crt -days 3650 -subj "/CN=PQC-Root-CA"
+#in ca vm pass crt and key file to server and client
+scp /home/kali/opensslt/ca_mldsa44.crt /home/kali/opensslt/ca_mldsa44.key kaliza@10.8.118.114:/home/kaliza/coTest/
+3. Issue a PQC Server Certificate via the CA
+A. Generate Server Key:
+openssl genpkey -algorithm ML-DSA-44 -out server_mldsa44.key
+B. Create Server CSR (certificate signing request):
+openssl req -new -key server_mldsa44.key -out server_mldsa44.csr -subj "/CN=pqc-server"
+C. Sign Server CSR with CA:
+openssl x509 -req -in server_mldsa44.csr -CA ca_mldsa44.crt -CAkey ca_mldsa44.key -CAcreateserial -out server_mldsa44.crt -days 365
+This produces server_mldsa44.crt signed by your PQC CA.
+4. Run a PQC-enabled TLS Server
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -CAfile ca_mldsa44.crt -www -groups X25519MLKEM768
+    -groups MLKEM512 enables Kyber/ML-KEM for PQC key exchange.
+    -CAfile points to your CA's certificate for client verification.
+5. Generate keypar and crt for client 
+#Generate key and crt for CA
+???
+# Generate client private key
+openssl genpkey -algorithm ML-DSA-44 -out client_mldsa44.key
+# Generate certificate signing request (CSR)
+openssl req -new -key client_mldsa44.key -out client_mldsa44.csr -subj "/CN=client.example.com"
+# Sign client CSR with CA
+openssl x509 -req -in client_mldsa44.csr -CA ca_mldsa44.crt -CAkey ca_mldsa44.key -CAcreateserial -out client_mldsa44.crt -days 3650
+6. Run a PQC-enabled TLS Client
+openssl s_client -connect 127.0.0.1:4433 -CAfile client_mldsa44.crt -groups X25519MLKEM768
+    This tells the client to trust your PQC CA and use PQC KEM for handshake.
+
+7. Verify
+    Client output should show:
+        Server public key is MLDSA44
+        Key Exchange: MLKEM512
+        The issuer of the server certificate should be /CN=PQC-Root-CA.
+
+8. (Optional) Test with Two VMs
+    Put the CA, server, and client on separate VMs for real network crossover.
+    Use the server VM's IP in the s_client command. 
+# Test crossover using different vms (do (C) or (D) first)
+#Start server(server)
+openssl s_server -cert server_mldsa44.crt -key server_mldsa44.key -www -groups MLKEM512
+#start client(client)
+openssl s_client -connect <server-ip>:4433 -groups MLKEM512
+#use wireshark in any server
+Using signature algorithm: Unknown Unknown (0x0905)= mldsa65  
+
+  
+ 
+
+^%%^
+h) Compile Openssl (15.7.2025)
+wget https://www.openssl.org/source/openssl-3.5.0.tar.gz
+tar -xvzf openssl-3.5.0.tar.gz
+cd openssl-3.5.0
+./Configure ^**^^*  or ./Configure –prefix=/opt/openssl-3.5 –openssldir=/opt/openssl-3.5 shared
+make -j$(nproc)
+sudo make install
+????(if have error)
+./Configure linux-armv4 (for rp 4)
+For alma?
+Sudo dnf install build-essential
+In dir openssl > ./Configure
+
+^%%%^ 
+i)	Make command line for running file (15.7.2025)
+#Checking path
+Echo $PATH
+
+#move in for cli
+Sudo mv <file name> to dir in @$PATH
+#make it to be cli
+ sudo mv binary_hacker.sh  /../../usr/local/bin
+j) openssl path linking (if error in outside dir) (17.7.2025)
+#temporary
+export LD_LIBRARY_PATH=~/openssl-3.5.0
+export PATH=~/openssl-3.5.0/apps:$PATH
+openssl version
+#update environment path  
+export PATH=/opt/openssl-3.5/bin:$PATH
+export LD_LIBRARY_PATH=/opt/openssl-3.5/lib:$LD_LIBRARY_PATH
+#confirm:: add path 
+Sudo nano /etc/environment
+~#Add 
+PATH=”/home/kaliza/openssl-3.5.0/apps”
+LD_LIBRARY_PATH=”/home/kaliza/openssl-3.5.0” 
+
+Help
+k) windows openssl::
+###Usage dir
+C:\OpenSSL-Win64\bin\openssl.exe
+Add into path (above)
+l) install lib window
+###All
+m) ssh with pqc 
+#check supported algo for kex
+ssh -Q kex
+#test ssh connection
+ssh -oKexAlgorithms=mlkem768x25519-sha256 kali@10.8.116.226
+
+n) 
+export SSLKEYLOGFILE=./sslkeys.log
+openssl s_server -cert server.crt -key server.key -accept 4433 -tls1_3 -groups X25519 -keylogfile sslkeys.log -chiper  “AES256-SHA”
+export SSLKEYLOGFILE=./sslkeys.log
+openssl s_server -cert server.crt -key server.key -accept 4433  -tls1_3 -groups X25519:MLKEM512 -keylogfile sslkeys.log
+
+export SSLKEYLOGFILE=./sslkeys.log
+openssl s_client -connect 127.0.0.1:4433 -tls1_3 -groups X25519  -keylogfile sslkeys.log
+export SSLKEYLOGFILE=./sslkeys.log
+openssl s_client -connect 127.0.0.1:4433 -tls1_3 -groups X25519:MLKEM512 -keylogfile sslkeys.log
+openssl s_server -key server.key -cert server.crt -accept 4433 -keylogfile sslkeys.log -cipher "AES256-SHA"    :::::::(take note: run on kail>>in tls-test)
+export SSLKEYLOGFILE=./sslkeys.log
+openssl s_client -connect 127.0.0.1:4433 -keylogfile sslkeys.log   ::(take note: run on Kalil7 >> home)
+
+o) sbom
+# 1. Generate SBOM
+sudo syft dir:/ -o json > full-sbom.json
+
+# 2. Filter crypto/security modules
+jq '.artifacts[] | select(.name | test("crypto|ssl|tls|gpg|pgp|sec|auth"; "i"))' full-sbom.json > filtered.json
+
+# 3. Add "enabled" status (example via script)
+python3 add_status.py filtered.json cbom.json
+p) cbom
+binwalk ??
+q) grype vul scan
+grype sbom:syft-sbom.json -o table // grype sbom:kali-sbom.json -o text > vulscan.txt
+
+r) testbed for tls
+ 
+
+step-by-Step Script for PQC TLS Testbed
+1. Update and Install Essentials
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y build-essential git cmake libssl-dev python3 python3-pip nginx libssl3 libssl-dev
+
+2. Install liboqs and OQS-OpenSSL
+# Get liboqs
+
+IBS=ON
+ninja
+sudo ninja install
+cd ../..
+
+# Get OQS-OpenSSL (OpenSSL latest+ PQC)
+git clone https://github.com/open-quantum-safe/openssl.git
+
+3. Generate a PQC + Classical Hybrid Certificate (Refer d) )
+/opt/oqs-openssl/bin/openssl req -x509 -new -newkey oqs_kem_default \
+  -keyout server.key -out server.crt -nodes -subj "/CN=yourdomain.com" -days 365
+sudo mkdir -p /etc/nginx/pqc_certs
+sudo mv server.key server.crt /etc/nginx/pqc_certs/
+
+4. Configure Nginx for TLS 1.3 + PQC
+Edit /etc/nginx/sites-available/default:
+server {
+    listen 443 ssl;
+    server_name yourdomain.com;
+    ssl_certificate /etc/nginx/pqc_certs/server.crt;
+    ssl_certificate_key /etc/nginx/pqc_certs/server.key;
+    ssl_protocols TLSv1.3;
+    ssl_ciphers "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256";
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+}
+ 
+____ ejas sendiri
+Enable and restart:
+sudo nginx -t
+sudo systemctl restart nginx
+////
+sudo a2ensite upm-ssl (file conf name)
+sudo systemctl reload apache2
+
+5. Test PQC Handshake
+/opt/oqs-openssl/bin/openssl s_client -connect yourdomain.com:443 -tls1_3
+
+6. Domain Integration (Optional)
+If you just want to pretend your VM is the real domain:
+On your host machine, edit /etc/hosts and point the domain to the VM’s IP:\
+192.168.56.10 yourdomain.com
+Or change DNS in your testing network to resolv0e it to the VM.
+
+7. Verify
+Open a browser and visit https://yourdomain.com — you should get a TLS 1.3 connection with a PQC hybrid cipher (check with DevTools > Security tab).
+
+
+s) compile cyclonedx 
+Clone the repo:
+git clone https://github.com/CycloneDX/cyclonedx-cli.git
+cd cyclonedx-cli
+Enter the src directory (this is where the main Go code is):
+cd src
+cd cyclonedx
+#make sure dotnet-sdk-8.0 version
+If not 
+# Download Microsoft repo package for Debian 12 (works with Kali Rolling)
+wget https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+# Install the repo config
+sudo dpkg -i packages-microsoft-prod.deb
+rm packages-microsoft-prod.deb
+#install new dotnet package
+sudo apt install -y dotnet-sdk-8.0
+# Update apt sources
+sudo apt update
+then build cyclonedx
+[~/cyclonedx-cli/src/cyclonedx]
+└─$ dotnet build cyclonedx.csproj -c Release    
+#file will be in 
+~/…/cyclonedx/bin/Release/net8.0
+t) install syft in kali and windows
+# install prerequisites
+sudo apt update
+sudo apt install golang git make
+
+# clone the repo
+git clone https://github.com/anchore/syft.git
+cd syft
+
+# build
+make build 
+./install.sh
+sudo mv syft /usr/local/bin/ (optional)
+
+u) check os version
+hostnamectl	
+v) compile ninja 
+sudo curl -L -o ninja-linux.zip https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux.zip
+sudo  unzip ninja-linux.zip -d “” or  + /usr/local/bin
+sudo chmod +x /usr/local/bin/ninja
+ninja –version
+w) compile cbomkit-theia 
+sudo dnf install git -y
+git clone https://github.com/PQCA/cbomkit-theia.git
+cd cbomkit-theia
+go mod download
+go build -o cbomkit-theia
+
+
+w) compile bom_agent:
+# 1. Go into your project folder
+cd ~/openssl_agent
+
+# 2. Verify files exist
+ls src pqc_agent.pro
+
+# 3. Run Qt's UI compiler manually (optional)
+uic src/pqc_agent.ui -o src/ui_pqc_agent.h
+
+# 4. Generate Makefile using qmake6
+qmake6 pqc_agent.pro
+
+# 5. Build
+make -j$(nproc)
+
+# 6. Run the compiled app
+./pqc_agent
+
+x) Run sonarcube cbomkit hyperion
+
+
+Notes::
+if openssl cannot do tls connection, check and allow port used on firewall
+sudo ufw status 
+sudo ufw allow 8080/tcp
+If openssl have error check ::
+::  export LD_LIBRARY_PATH=/your/custom/lib/path:$LD_LIBRARY_PATH //x logic tapi jadi lak  
+:: export LD_LIBRARY_PATH=~/openssl-3.5.1 // compem
+:: python3 -m venv myenv >> source myenv/bin/activate

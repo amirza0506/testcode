@@ -540,6 +540,20 @@ docker run -d \
   sonarqube:community
 -- browse >>http://localhost:9000
 
+18/11/25
+y) compile cbomkit
+install sonar-plugin…...jar
+mvn install:install-file \
+  -Dfile=sonar-cryptography-plugin-1.4.8.jar \
+  -DgroupId=com.ibm \
+  -DartifactId=sonar-cryptography-plugin \
+  -Dversion=1.4.7 \
+  -Dpackaging=jar
+ run cbomkit 
+(kali㉿kalidah)-[~/cbomkit]
+└─$ sudo make production
+
+
 
 Notes::
 if openssl cannot do tls connection, check and allow port used on firewall
